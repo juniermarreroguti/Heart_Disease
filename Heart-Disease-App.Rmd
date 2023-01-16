@@ -1,0 +1,505 @@
+---
+title: "Previsão de Doenças Cardíacas"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: flatly
+    social: menu
+runtime: shiny
+---
+
+
+```{r Librerias, include= FALSE, eval= TRUE}
+
+library("tidyverse")
+library("rsample")
+library("recipes")
+library("parsnip")
+library("knitr")
+library("caret")
+library("stringr")
+library("corrplot")
+library("yardstick")
+library("viridisLite")
+library("GGally")
+library("dplyr")
+library("tidyverse")
+library("pROC")
+library("lime")
+library("flexdashboard")
+library("e1071")
+library("shiny")
+
+
+```
+
+
+
+```{r Load-Data and Constructed Model, eval=TRUE, include=FALSE, echo= FALSE}
+
+heart_disease_dataset <- read.csv(file = "processed.cleveland.data", header = F)
+
+# Nome da colunas
+names <- c("Idade",
+           "Sexo",
+           "Tipo_Dor_Toracica",
+           "Pressão_Sanguinea_Repouso",
+           "Colesterol_Serico",
+           "Acucar_sangue_Jejum",
+           "ECG_repouso",
+           "Freq_Cardiaca_Maxima",
+           "Angina_induzida_Treinamento",
+           "Treinamento_Depressao_ST",
+           "Pico_Treinamento_ST",
+           "Num_Major_Vessels_Flouro",
+           "Talassemia",
+           "Diagnostico_Doenca_Cardiaca")
+
+# Apply column names to dataframe
+colnames(heart_disease_dataset) <- names
+
+######################################################################
+## 1. Pré-Processamento de dados
+######################################################################
+
+# Elimine os NAs, converta em fatores, fixe a variável de destino em 2 níveis, remova "?"
+heart_dataset_clean_tbl <- heart_disease_dataset %>% 
+                                      drop_na() %>%
+                                      mutate_at(c("ECG_repouso", 
+                                                  "Acucar_sangue_Jejum", 
+                                                  "Sexo", 
+                                                  "Diagnostico_Doenca_Cardiaca", 
+                                                  "Angina_induzida_Treinamento",
+                                                  "Pico_Treinamento_ST", 
+                                                  "Tipo_Dor_Toracica"), as_factor) %>%
+                          mutate(Num_Major_Vessels_Flouro = as.numeric(Num_Major_Vessels_Flouro)) %>%
+                          mutate(Diagnostico_Doenca_Cardiaca = fct_lump(Diagnostico_Doenca_Cardiaca, other_level = "1")) %>% 
+                          filter(Talassemia != "?") %>%
+                          select(Idade, 
+                                 Pressão_Sanguinea_Repouso, 
+                                 Colesterol_Serico, 
+                                 Freq_Cardiaca_Maxima, 
+                                 Treinamento_Depressao_ST,
+                                 Num_Major_Vessels_Flouro,
+                                 everything())
+
+#Select categorical vars, recode them to their character values, convert to long format
+hd_long_fact_tbl <- heart_dataset_clean_tbl  %>%
+                    select(Sexo,
+                           Tipo_Dor_Toracica,
+                           Acucar_sangue_Jejum,
+                           ECG_repouso,
+                           Angina_induzida_Treinamento,
+                           Pico_Treinamento_ST,
+                           Talassemia,
+                           Diagnostico_Doenca_Cardiaca) %>%
+                           mutate(Sexo = recode_factor(Sexo, `0` = "F", 
+                                                      `1` = "M" ),
+                   Tipo_Dor_Toracica = recode_factor(Tipo_Dor_Toracica, `1` = "tipico",   
+                                                                        `2` = "atipico",
+                                                                        `3` = "não_angina", 
+                                                                        `4` = "asintomatico"),
+                    Acucar_sangue_Jejum = recode_factor(Acucar_sangue_Jejum, `0` = "<= 120 mg/dl", 
+                                                                            `1` = "> 120 mg/dl"),
+                   ECG_repouso = recode_factor(ECG_repouso, `0` = "normal",
+                                                            `1` = "ST-T anormal",
+                                                            `2` = "LV hipertrofia"),
+                   Angina_induzida_Treinamento = recode_factor(Angina_induzida_Treinamento, `0` = "não",
+                                                                                        `1` = "sim"),
+                   Pico_Treinamento_ST = recode_factor(Pico_Treinamento_ST, `1` = "up-inclinado",
+                                                                      `2` = "plano",
+                                                                      `3` = "down-inclinado"),
+                   Talassemia = recode_factor(Talassemia, `3` = "normal",
+                                                          `6` = "Defeito-Corrigido",
+                                                          `7` = "Defeito-Reversivel")) %>%
+                                  gather(key = "key", value = "value", -Diagnostico_Doenca_Cardiaca)
+
+
+# Unir datos necesários
+
+aux1 <- heart_dataset_clean_tbl  %>%
+        select(Sexo,
+         Tipo_Dor_Toracica,
+         Acucar_sangue_Jejum,
+         ECG_repouso,
+         Angina_induzida_Treinamento,
+         Pico_Treinamento_ST,
+         Talassemia,
+         Diagnostico_Doenca_Cardiaca) %>%
+          mutate(Sexo = recode_factor(Sexo, `0` = "F", 
+                                      `1` = "M" ),
+                 Tipo_Dor_Toracica = recode_factor(Tipo_Dor_Toracica, `1` = "tipico",   
+                                                   `2` = "atipico",
+                                                   `3` = "não_angina", 
+                                                   `4` = "asintomatico"),
+                 Acucar_sangue_Jejum = recode_factor(Acucar_sangue_Jejum, `0` = "<= 120 mg/dl", 
+                                                     `1` = "> 120 mg/dl"),
+                 ECG_repouso = recode_factor(ECG_repouso, `0` = "normal",
+                                             `1` = "ST-T anormal",
+                                             `2` = "LV hipertrofia"),
+                 Angina_induzida_Treinamento = recode_factor(Angina_induzida_Treinamento, `0` = "não",
+                                                             `1` = "sim"),
+                 Pico_Treinamento_ST = recode_factor(Pico_Treinamento_ST, `1` = "up-inclinado",
+                                                     `2` = "plano",
+                                                     `3` = "down-inclinado"),
+                 Talassemia = recode_factor(Talassemia, `3` = "normal",
+                                            `6` = "Defeito-Corrigido",
+                                            `7` = "Defeito-Reversivel"),
+                 Diagnostico_Doenca_Cardiaca = recode_factor(Diagnostico_Doenca_Cardiaca, `0` = "NÃO",
+                                                             `1` = "SIM")
+  )
+
+
+
+aux2 <- heart_dataset_clean_tbl  %>%
+              select(Idade,
+                     Pressão_Sanguinea_Repouso,
+                     Colesterol_Serico,
+                     Freq_Cardiaca_Maxima,
+                     Treinamento_Depressao_ST,
+                     Num_Major_Vessels_Flouro)
+
+
+aux3 <- data.frame(aux2, aux1)
+
+aux4 <- aux3[,c(14,1:13)]
+
+##############################################################
+#### 2. Construir o modelo 
+##############################################################
+
+#### Modelo
+
+# Vamos ao modelo 
+modelo <- aux4
+
+# Varaivel que precisei transformar
+modelo$Talassemia <- as.factor(modelo$Talassemia)
+modelo$Talassemia <- factor(modelo$Talassemia, 
+                           levels=levels(modelo$Talassemia)[2:5])
+
+# Vou trabalhar sem dividir em conjunto treinameno e validação (com todos os dados) 
+train.data <- modelo
+train.data$Diagnostico_Doenca_Cardiaca <- factor(train.data$Diagnostico_Doenca_Cardiaca, 
+                                          levels=levels(train.data$Diagnostico_Doenca_Cardiaca)[2:1])
+
+Label1 <- names(table(train.data$Diagnostico_Doenca_Cardiaca))[1]
+Label2 <- names(table(train.data$Diagnostico_Doenca_Cardiaca))[2]
+
+# reressão Logistica penalizada com Lasso (lambda otimizado a partir de input de valores-LOOCV como 
+# validação)
+
+lambda <- 10^seq(10,-2,length=100)   # optimization hyperparameters
+set.seed(1107)
+model.orig.lasso <- train(Diagnostico_Doenca_Cardiaca ~ .,
+                          data = train.data,
+                          method="glmnet", 
+                          family="binomial",
+                          preProcess = c("scale", "center"),
+                          #weights = weights,
+                          tuneGrid = expand.grid(alpha = 1, lambda = lambda),
+                          metric = "ROC",
+                          trControl = trainControl(method = "LOOCV",
+                                                   number = 5, 
+                                                   savePredictions = "all",
+                                                   classProbs=TRUE,
+                                                   summaryFunction = twoClassSummary,
+                                                   verboseIter = FALSE))
+
+
+D.orig <- model.orig.lasso$bestTune$lambda
+A.orig <- data.frame(model.orig.lasso$pred)
+B.orig <- A.orig[A.orig$lambda == D.orig,]
+
+pred.orig <- B.orig[,c(4,5)]
+
+roc.orig <- roc(B.orig$obs, 
+                pred.orig[,1],
+                ci =FALSE,
+                auc = TRUE,
+                quiet = FALSE)
+
+aux2.orig <- coords(roc.orig, best.method = "closest.topleft", x="best", rect ="sensitivity", transpose = TRUE)
+aux3.orig <- ifelse(pred.orig[,1] >= aux2.orig[[1]], Label1, Label2)
+
+conf.orig.best <- confusionMatrix(as.factor(aux3.orig), 
+                                  as.factor(B.orig$obs),
+                                  positive=levels(as.factor(B.orig$obs))[1]) 
+
+
+```
+
+
+
+Manual
+========================================================
+
+### Apresentaçaõ e Uso
+
+<div class=text-justify>
+
+&nbsp;&nbsp;&nbsp;
+**Apresentação**
+
+
+&nbsp;&nbsp;&nbsp;
+Este **APLICATIVO** realiza análises _Preditivas de Doenças Cardíacas_ em função de 13 variáveis clínicas. O modelo de classificação foi construido com dados de 303 pacientes disponibilizados pela [Clínica Cardíaca de Clevand](https://archive.ics.uci.edu/ml/datasets/Heart+Disease) e apresenta precisão > 86%. **Os aumentos nas chances de doenças cardíacas não sustituim critérios médicos**. Nosso objetivo é exemplificar, na prática, a importância da integração da clínica a modelos de _machine learning_.
+
+
+&nbsp;&nbsp;&nbsp;
+**Uso do APLICATIVO**
+
+&nbsp;&nbsp;&nbsp;
+O aplicativo tem um uso intuitivo
+
+  1. Na aba **Variáveis** seleccione as diferentes variáveis clínicas do paciente. Não se procupe caso não consiga seleccionar todas. As variáveis que aparecem por _default_ estão definidas para reduzir o risco de doença cardíaca.  
+  
+  2. Na aba **Previsão** tem os resultados do modelo de _machine learning_ (o tempo de resposta do modelo nas primeiras previsões é ~ 30seg, após é optimizado).
+
+  &nbsp;&nbsp;&nbsp;
+  - No _Painel Esquerdo_ apresentamos o gráfico _Distribuição de variáveis_. Nele associamos as variáveis em color vermelho as que devem ser controladas para reduzir,  caso seja possível, a aparição da doença.
+  
+  &nbsp;&nbsp;&nbsp;
+  - No _Painel Direito_ apresentamos o gráfico da _Previsão da Doenças Cardíacas_ que oferece, em percento, a probabilidade do paciente de ter a doença.
+  
+  &nbsp;&nbsp;&nbsp;
+  - No _Painel Inferior_  mostramos a _Interpretação_  do modelo em forma de um um breve resumo dos resultados.
+
+<div class=text-center>
+
+**Obrigado**
+
+</div>
+  
+
+<div class=text-right>
+
+**Crédito: Junier Marrero Gutiérrez, Ph.D.**
+
+</div>
+  
+
+</div>
+
+
+Variáveis
+========================================================
+
+
+Row {data-height=800}
+----------------------------------------------------------
+
+### Variáveis Categôricas 
+
+```{r Categoria - I, eval=TRUE, echo= FALSE}
+
+selectInput("Acucar_sangue_Jejum", 
+            "Açúcar em Sange no Jejum",
+            choices = list("<= 120 mg/dl" = paste0("<= 120 mg/dl"),
+                           "> 120 mg/dl"  = paste0("> 120 mg/dl")),
+            selected = 1)
+
+selectInput("Angina_induzida_Treinamento", 
+            "Angina induzida durante Treinamento",
+            choices = list("não" = paste0("não"),
+                           "sim"  = paste0("sim")),
+            selected = 1)
+
+selectInput("ECG_repouso", 
+            "Ecocardiograma em repouso",
+            choices = list("normal" = paste0("normal"),
+                           "ST-T anormal"  = paste0("ST-T anormal"),
+                           "LV hipertrofia"  = paste0("LV hipertrofia")),
+            selected = 1)
+
+selectInput("Sexo", 
+            "Sexo",
+            choices = list("F" = paste0("F"),
+                           "M"  = paste0("M")),
+            selected = 1)
+
+
+
+```
+
+
+### Variáveis Categôricas 
+
+
+```{r Categoria - II, eval=TRUE, echo= FALSE}
+selectInput("Pico_Treinamento_ST", 
+            "Pico do treinamento ST Segment",
+            choices = list("up-inclinado" = paste0("up-inclinado"),
+                           "plano"  = paste0("plano"),
+                           "down-inclinado"  = paste0("down-inclinado")),
+            selected = 1)
+
+
+selectInput("Talassemia", 
+            "Talassemia",
+            choices = list("3.0" = paste0("3.0"),
+                           "6.0"  = paste0("6.0"),
+                           "7.0"  = paste0("7.0")),
+            selected = 1)
+
+selectInput("Tipo_Dor_Toracica", 
+            "Tipo Dor Toracica",
+            choices = list("tipico" = paste0("tipico"),
+                           "não_angina"  = paste0("não_angina"),
+                           "atipico"  = paste0("atipico"),
+                           "asintomatico"  = paste0("asintomatico")),
+            selected = 1)
+
+```
+
+
+
+### Variaveis Numéricas 
+
+```{r Numerica - I, eval=TRUE, echo= FALSE}
+
+numericInput('Colesterol_Serico', 'Colesterol Sérico (mg/dl)', 110, min = 120, max = 500)
+
+numericInput('Freq_Cardiaca_Maxima', 
+             'Freqüência cardíaca máxima alcançada', 60, min = 70, max = 610)
+
+numericInput('Idade', 
+             'Idade (anos)', 15, min = 15, max = 90)
+
+
+```
+
+
+
+### Variáveis Numéricas 
+
+```{r Numerica - II, eval=TRUE, echo= FALSE}
+numericInput('Num_Major_Vessels_Flouro', 
+             'Número de vasos visíveis sob o flouro', 0, min = 1, max = 5)
+
+numericInput('Pressão_Sanguinea_Repouso', 
+             'Pressão arterial sistólica em repouso (mm Hg)', 80, min = 90, max = 220)
+
+numericInput('Treinamento_Depressao_ST', 
+             'Depressão de ST induzida por exercício', 0, min = 0, max = 10)
+
+```
+
+
+
+Previsão
+========================================================
+
+
+Row {data-height=1000}
+----------------------------------------------------------------------
+
+
+### Distribuição de variáveis 
+
+```{r LIME, eval=TRUE, echo= FALSE}
+
+ b <- reactive({
+ 
+ rbind(train.data[1:20,-1], Paciente = p())
+ 
+ })
+ 
+ 
+ explainer <-reactive({
+ 
+   lime(b(), model.orig.lasso)
+ 
+ })
+ 
+ 
+ explanation <- reactive({
+ 
+ explain(b(), explainer(), n_labels = 1, n_features = 13)
+ 
+ })
+ 
+ 
+renderPlot({
+ 
+  plot_features(explanation(), ncol = 1, cases = "Paciente" ) +
+                   theme(text = element_text(size = 12), 
+                         legend.position = "none",
+                          axis.title.y=element_blank())  
+
+ 
+ 
+ })
+
+```
+
+
+### Previsão de Doenças Cardíacas
+
+
+```{r Guage, eval=TRUE, echo= FALSE}
+
+p <- reactive({
+  
+  cbind.data.frame (Idade=input$Idade,
+                    Pressão_Sanguinea_Repouso=input$Pressão_Sanguinea_Repouso,
+                    Colesterol_Serico=input$Colesterol_Serico,
+                    Freq_Cardiaca_Maxima=input$Freq_Cardiaca_Maxima,
+                    Treinamento_Depressao_ST=input$Treinamento_Depressao_ST,
+                    Num_Major_Vessels_Flouro=input$Num_Major_Vessels_Flouro,
+                    Sexo=input$Sexo,
+                    Tipo_Dor_Toracica=input$Tipo_Dor_Toracica,
+                    Acucar_sangue_Jejum=input$Acucar_sangue_Jejum,
+                    ECG_repouso=input$ECG_repouso,
+                    Angina_induzida_Treinamento=input$Angina_induzida_Treinamento,
+                    Pico_Treinamento_ST=input$Pico_Treinamento_ST,
+                    Talassemia=input$Talassemia)
+
+})
+  
+
+
+pred <- reactive ({
+  
+v <- predict(model.orig.lasso, newdata=p(), type = "prob")[[1]]
+
+v*100
+
+})
+
+
+renderGauge({
+
+gauge(round(pred(),digits = 1), 
+      min = 0, 
+      max = 100, 
+      symbol = '%',
+      gaugeSectors(
+      success = c(100, 6), warning = c(5,1), danger = c(0, 1), colors = c("#CC6699")))
+
+})
+
+
+
+```
+
+
+Row {.tabset}
+-----------------------------------------------------------------------
+
+### Interpretação
+
+```{r Final, eval=TRUE, echo= FALSE}
+
+
+renderText({
+
+paste0 ("Segundo o modelo, o paciente ", unique(explanation()[explanation()$case=="Paciente",3]), " têm probabilidade de Doenças Cardiaca. Sendo a probabilidade de ", round(pred(),digits = 1),"%." )
+
+  })
+
+
+
+```
+
